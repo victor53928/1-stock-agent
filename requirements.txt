@@ -1,0 +1,6 @@
+streamlit==1.61.1
+streamlit-shadcn-ui==1.1.0
+streamlit-extras==1.6.0
+finance-datareader==0.9.202
+altair==6.2.2
+pandas==2.3.3
