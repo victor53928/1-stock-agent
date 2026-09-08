@@ -5,3 +5,4 @@ venv/
 *.egg-info/
 .streamlit/secrets.toml
 .claude/scheduled_tasks.lock
+.env
