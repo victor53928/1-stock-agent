@@ -1,0 +1,27 @@
+name: 얀덱스 뉴스 노션 요약 동기화
+
+on:
+  schedule:
+    # 12:00 KST(UTC+9) == 03:00 UTC(같은 날)
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: 얀덱스 뉴스 러시아 주요 기사 10건 노션에 동기화
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          YANDEX_NOTION_DATABASE_ID: ${{ secrets.YANDEX_NOTION_DATABASE_ID }}
+          YANDEX_NEWS_RSS_URL: ${{ secrets.YANDEX_NEWS_RSS_URL }}
+        run: python scripts/yandex_news_notion.py sync --count 10

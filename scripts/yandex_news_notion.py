@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""네이버 뉴스 주요 기사를 노션 데이터베이스에 CRUD/쿼리하는 CLI.
+"""얀덱스(Яндекс) 뉴스 기준 러시아 주요 기사를 노션 데이터베이스에 CRUD/쿼리하는 CLI.
 
 환경 변수 (.env):
-    NOTION_TOKEN        노션 내부 통합(Internal Integration) 토큰
-    NOTION_DATABASE_ID  대상 데이터베이스 ID
-    NAVER_CLIENT_ID     네이버 오픈API 클라이언트 ID
-    NAVER_CLIENT_SECRET 네이버 오픈API 클라이언트 시크릿
-    NAVER_NEWS_QUERY    검색 키워드 (기본값: 증시)
+    NOTION_TOKEN            노션 내부 통합(Internal Integration) 토큰
+    YANDEX_NOTION_DATABASE_ID  대상 데이터베이스 ID
+    YANDEX_NEWS_RSS_URL     얀덱스 뉴스 RSS 주소 (기본값: 얀덱스 메인 헤드라인)
+
+얀덱스 뉴스는 네이버와 달리 발급받는 API 키가 필요 없는 공개 RSS 피드를 쓴다
+(기존 Google 뉴스 RSS 연동과 동일한 방식, utils/data.py의 load_news 참고).
 
 서브커맨드:
-    sync    네이버 뉴스 주요 기사 상위 N개를 요약해 노션에 저장 (매일 실행용)
+    sync    얀덱스 뉴스 주요 기사 상위 N개를 요약해 노션에 저장 (매일 실행용)
     create  기사를 하나 직접 생성
     list    저장된 기사를 날짜 등으로 조회
     get     단일 기사 상세 조회
@@ -26,6 +27,9 @@ import html
 import os
 import re
 import sys
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -42,53 +46,60 @@ from notion_news_crud import (
     update_entry,
 )
 
-NAVER_NEWS_URL = "https://openapi.naver.com/v1/search/news.json"
-KST = timezone(timedelta(hours=9))
+DEFAULT_RSS_URL = "https://news.yandex.ru/index.rss"
+MSK = timezone(timedelta(hours=3))
 
 
 def database_id() -> str:
-    return require_env("NOTION_DATABASE_ID")
+    return require_env("YANDEX_NOTION_DATABASE_ID")
 
 
 # --------------------------------------------------------------------------
-# 네이버 뉴스
+# 얀덱스 뉴스
 # --------------------------------------------------------------------------
 
 
 def strip_html(text: str) -> str:
-    """네이버 API가 내려주는 <b> 하이라이트 태그 등을 제거하고 엔티티를 복원한다."""
-    return html.unescape(re.sub(r"<[^>]+>", "", text)).strip()
+    return html.unescape(re.sub(r"<[^>]+>", "", text or "")).strip()
 
 
-def fetch_naver_news(query: str, display: int = 30, sort: str = "date") -> list[dict[str, Any]]:
-    """네이버 뉴스 검색 API에서 기사 목록을 가져온다."""
-    client_id = require_env("NAVER_CLIENT_ID")
-    client_secret = require_env("NAVER_CLIENT_SECRET")
-    resp = requests.get(
-        NAVER_NEWS_URL,
-        params={"query": query, "display": display, "sort": sort},
-        headers={
-            "X-Naver-Client-Id": client_id,
-            "X-Naver-Client-Secret": client_secret,
-        },
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json().get("items", [])
+def fetch_yandex_news(rss_url: str | None = None) -> list[dict[str, Any]]:
+    """얀덱스 뉴스 RSS 피드에서 기사 목록을 가져온다 (API 키 불필요)."""
+    url = rss_url or os.environ.get("YANDEX_NEWS_RSS_URL", DEFAULT_RSS_URL)
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        raw = response.read()
+    root = ET.fromstring(raw)
+
+    items = []
+    for item in root.findall(".//item"):
+        source_el = item.find("source")
+        category_el = item.find("category")
+        items.append(
+            {
+                "title": item.findtext("title") or "",
+                "link": item.findtext("link") or "",
+                "description": item.findtext("description") or "",
+                "pubDate": item.findtext("pubDate") or "",
+                "source": source_el.text if source_el is not None else "",
+                "category": category_el.text if category_el is not None else "",
+            }
+        )
+    return items
 
 
 def parse_pub_date(raw: str) -> datetime:
-    # 예: "Mon, 08 Sep 2026 09:00:00 +0900"
+    # 예: "Tue, 08 Sep 2026 12:00:00 +0300"
     return datetime.strptime(raw, "%a, %d %b %Y %H:%M:%S %z")
 
 
 def pick_top_articles(items: list[dict[str, Any]], target_date: datetime.date, count: int) -> list[dict[str, Any]]:
-    """target_date(KST 기준)에 발행된 기사를 우선으로 상위 count개를 고른다."""
+    """target_date(모스크바 기준)에 발행된 기사를 우선으로 상위 count개를 고른다."""
     same_day = []
     others = []
     for item in items:
         try:
-            pub = parse_pub_date(item["pubDate"]).astimezone(KST)
+            pub = parse_pub_date(item["pubDate"]).astimezone(MSK)
         except (KeyError, ValueError):
             continue
         item["_pub_dt"] = pub
@@ -103,43 +114,42 @@ def pick_top_articles(items: list[dict[str, Any]], target_date: datetime.date, c
 
 
 def cmd_sync(args: argparse.Namespace) -> None:
-    query = args.query or os.environ.get("NAVER_NEWS_QUERY", "증시")
-    target_date = datetime.now(KST).date() if not args.date else datetime.strptime(args.date, "%Y-%m-%d").date()
+    target_date = datetime.now(MSK).date() if not args.date else datetime.strptime(args.date, "%Y-%m-%d").date()
 
-    items = fetch_naver_news(query, display=max(args.count * 3, 30), sort="date")
+    items = fetch_yandex_news(args.rss_url)
     top_items = pick_top_articles(items, target_date, args.count)
 
     if not top_items:
-        print(f"'{query}' 검색 결과가 없습니다.")
+        print("얀덱스 뉴스 결과가 없습니다.")
         return
 
     db_id = database_id()
     created, skipped = 0, 0
     for rank, item in enumerate(top_items, start=1):
-        link = item["originallink"] or item["link"]
-        if query_entries(db_id, link=link):
+        link = item["link"]
+        if not link or query_entries(db_id, link=link):
             skipped += 1
             continue
         title = strip_html(item["title"])
         summary = strip_html(item["description"])
-        pub_dt = item.get("_pub_dt") or datetime.now(KST)
+        pub_dt = item.get("_pub_dt") or datetime.now(MSK)
         create_entry(
             db_id,
             title=title,
             date=pub_dt,
             rank=rank,
-            source=query,
+            source=item["source"] or "Яндекс.Новости",
             summary=summary,
             link=link,
-            category=query,
+            category=item["category"] or "러시아",
         )
         created += 1
 
-    print(f"완료: {target_date} 기준 {created}건 생성, {skipped}건 중복 스킵 (쿼리='{query}')")
+    print(f"완료: {target_date} 기준 {created}건 생성, {skipped}건 중복/누락 스킵")
 
 
 def cmd_create(args: argparse.Namespace) -> None:
-    date = datetime.strptime(args.date, "%Y-%m-%d") if args.date else datetime.now(KST)
+    date = datetime.strptime(args.date, "%Y-%m-%d") if args.date else datetime.now(MSK)
     entry = create_entry(
         database_id(),
         title=args.title,
@@ -191,10 +201,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_sync = sub.add_parser("sync", help="네이버 뉴스 주요 기사를 요약해 노션에 저장")
-    p_sync.add_argument("--query", help="검색 키워드 (기본: NAVER_NEWS_QUERY 또는 '증시')")
+    p_sync = sub.add_parser("sync", help="얀덱스 뉴스 주요 기사를 요약해 노션에 저장")
+    p_sync.add_argument("--rss-url", help="얀덱스 뉴스 RSS 주소 (기본: YANDEX_NEWS_RSS_URL)")
     p_sync.add_argument("--count", type=int, default=10, help="저장할 기사 수 (기본 10)")
-    p_sync.add_argument("--date", help="기준 날짜 YYYY-MM-DD (기본: 오늘, KST)")
+    p_sync.add_argument("--date", help="기준 날짜 YYYY-MM-DD (기본: 오늘, MSK)")
     p_sync.set_defaults(func=cmd_sync)
 
     p_create = sub.add_parser("create", help="기사 직접 생성")
@@ -243,6 +253,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except requests.HTTPError as e:
         print(f"API 오류: {e.response.status_code} {e.response.text}", file=sys.stderr)
+        return 1
+    except ET.ParseError as e:
+        print(f"RSS 파싱 오류: {e}", file=sys.stderr)
+        return 1
+    except urllib.error.URLError as e:
+        print(f"네트워크 오류: {e}", file=sys.stderr)
         return 1
     return 0
 

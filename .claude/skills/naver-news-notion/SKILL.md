@@ -14,6 +14,11 @@ description: "네이버 뉴스 주요 기사를 노션 데이터베이스에 CRU
 
 - 노션 데이터베이스: "네이버 뉴스 요약" (속성: 제목/날짜/순위/언론사/요약/링크/카테고리)
 - ID는 `.env`의 `NOTION_DATABASE_ID`에 저장되어 있다 (커밋되지 않음, `.env.example` 참고).
+- 노션 CRUD/쿼리 자체는 `scripts/notion_news_crud.py`로 추출되어 있으며, 같은
+  속성 스키마를 쓰는 `scripts/yandex_news_notion.py`(얀덱스 뉴스, `naver-news-notion`
+  스킬과 별개인 `yandex-news-notion` 스킬 참고)와 공유한다. 두 CLI 모두
+  `NOTION_TOKEN`은 같지만 데이터베이스 ID 환경 변수는 다르다
+  (`NOTION_DATABASE_ID` vs `YANDEX_NOTION_DATABASE_ID`).
 
 ## 최초 설정 (사람이 직접 해야 하는 단계)
 
